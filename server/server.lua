@@ -1,12 +1,14 @@
 local RSGCore = exports['rsg-core']:GetCoreObject()
-lib.locale()
 
 -- config labels are locale keys: translate them once
 for _, f in ipairs(Config.Films) do f.label = locale(f.label) end
 for _, c in pairs(Config.Cinemas) do c.label = locale(c.label) end
 
--- Saved picture adjustments (admin panel) live in data/draw.json
+local SELLER_RANGE = 5.0 -- must match the client's ticket UI range
+
+---------------------------------------------------------------- saved picture settings (data/draw.json)
 local DRAW_FILE = 'data/draw.json'
+
 local function loadDraws()
     local raw = LoadResourceFile(GetCurrentResourceName(), DRAW_FILE)
     local ok, data = pcall(json.decode, raw or '{}')
@@ -15,37 +17,44 @@ local function loadDraws()
         if Config.Cinemas[id] and type(d) == 'table' then Config.Cinemas[id].draw = d end
     end
 end
-local function saveDraws()
-    local out = {}
-    for id, cfg in pairs(Config.Cinemas) do out[id] = cfg.draw end
-    SaveResourceFile(GetCurrentResourceName(), DRAW_FILE, json.encode(out, { indent = true }), -1)
-end
-loadDraws()
 
-lib.callback.register('rsg-cinema:server:getDraws', function()
+local function allDraws()
     local out = {}
     for id, cfg in pairs(Config.Cinemas) do out[id] = cfg.draw end
     return out
-end)
+end
 
--- State per cinema: { filmIndex, nextShow (os.time), playing, public, startedAt, tickets = { [citizenid] = pricePaid } }
+local function saveDraws()
+    SaveResourceFile(GetCurrentResourceName(), DRAW_FILE, json.encode(allDraws(), { indent = true }), -1)
+end
+
+loadDraws()
+
+RSGCore.Functions.CreateCallback('rsg-cinema:server:getDraws', function(_, cb) cb(allDraws()) end)
+
+---------------------------------------------------------------- show state
+-- Cinemas[id] = { filmIndex, nextShow (os.time), playing, public, startedAt, tickets = { [citizenid] = pricePaid } }
 local Cinemas = {}
 
 local function notify(src, desc, ntype)
-    TriggerClientEvent('ox_lib:notify', src, { title = locale('sv_title'), description = desc, type = ntype or 'inform' })
+    TriggerClientEvent('RSGCore:Client:Notify', src, { title = locale('sv_title'), description = desc, type = ntype or 'inform', duration = 5000 })
+end
+
+local function currentFilm(id)
+    return Config.Films[Config.Cinemas[id].films[Cinemas[id].filmIndex]]
 end
 
 local function publicState(id)
     local c = Cinemas[id]
-    if not c then return nil end
-    local film = Config.Films[Config.Cinemas[id].films[c.filmIndex]]
+    local film = currentFilm(id)
+    local left = c.nextShow - os.time()
     return {
         id = id,
         film = film and film.label or '?',
         playlist = film and film.playlist or nil,
         playing = c.playing,
-        startsIn = math.max(0, c.nextShow - os.time()),
-        salesOpen = not c.playing and (c.nextShow - os.time()) <= Config.SalesWindow * 60,
+        startsIn = math.max(0, left),
+        salesOpen = not c.playing and left <= Config.SalesWindow * 60,
     }
 end
 
@@ -54,39 +63,46 @@ local function nextFilm(id)
     c.filmIndex = c.filmIndex % #Config.Cinemas[id].films + 1
 end
 
-local function sendToHolders(id, event, ...)
+local function scheduleNext(id)
+    Cinemas[id].nextShow = os.time() + Config.ShowInterval * 60
+end
+
+-- refunds every online ticket holder of a cancelled paid showing
+local function refundTickets(id)
     local c = Cinemas[id]
-    for _, src in ipairs(GetPlayers()) do
-        local Player = RSGCore.Functions.GetPlayer(tonumber(src))
-        if Player and c.tickets[Player.PlayerData.citizenid] then
-            TriggerClientEvent(event, tonumber(src), ...)
+    for cid, paid in pairs(c.tickets) do
+        local P = RSGCore.Functions.GetPlayerByCitizenId(cid)
+        if P and type(paid) == 'number' and paid > 0 then
+            P.Functions.AddMoney('cash', paid, 'cinema-refund')
+            notify(P.PlayerData.source, locale('sv_refunded', Config.Cinemas[id].label), 'inform')
         end
     end
+    c.tickets = {}
 end
 
 local function endShow(id)
     local c = Cinemas[id]
     if not c or not c.playing then return end
-    c.playing = false
-    c.public = false
-    TriggerClientEvent('rsg-cinema:client:stopFilm', -1, id)
+    c.playing, c.public = false, false
     c.tickets = {}
+    TriggerClientEvent('rsg-cinema:client:stopFilm', -1, id)
     nextFilm(id)
-    c.nextShow = os.time() + Config.ShowInterval * 60
+    scheduleNext(id)
 end
 
 -- public = true (admin start): everyone inside sees it, no ticket needed
 local function startShow(id, public)
     local c = Cinemas[id]
     if not c or c.playing then return end
-    c.playing = true
-    c.public = public == true
-    c.startedAt = os.time()
+    c.playing, c.public, c.startedAt = true, public == true, os.time()
     local st = publicState(id)
     if c.public then
         TriggerClientEvent('rsg-cinema:client:startFilm', -1, id, st.playlist, st.film, false)
-    else
-        sendToHolders(id, 'rsg-cinema:client:startFilm', id, st.playlist, st.film, true)
+        return
+    end
+    for cid in pairs(c.tickets) do
+        local P = RSGCore.Functions.GetPlayerByCitizenId(cid)
+        if P then TriggerClientEvent('rsg-cinema:client:startFilm', P.PlayerData.source, id, st.playlist, st.film, true) end
     end
 end
 
@@ -100,7 +116,8 @@ CreateThread(function()
         end
         cfg.films = valid
         if cfg.enabled and #cfg.films > 0 then
-            Cinemas[id] = { filmIndex = 1, nextShow = os.time() + Config.ShowInterval * 60, playing = false, startedAt = 0, tickets = {} }
+            Cinemas[id] = { filmIndex = 1, playing = false, public = false, startedAt = 0, tickets = {} }
+            scheduleNext(id)
         end
     end
     while true do
@@ -113,7 +130,7 @@ CreateThread(function()
                     startShow(id)
                 else -- nobody bought a ticket: skip to the next showing
                     nextFilm(id)
-                    c.nextShow = now + Config.ShowInterval * 60
+                    scheduleNext(id)
                 end
             end
         end
@@ -121,9 +138,10 @@ CreateThread(function()
     end
 end)
 
-local function ticketInfo(src, id)
-    local Player = RSGCore.Functions.GetPlayer(src)
-    if not Player then return nil end
+---------------------------------------------------------------- tickets
+local function validCinema(id) return type(id) == 'string' and Cinemas[id] ~= nil end
+
+local function ticketInfo(Player, id)
     local st = publicState(id)
     st.label = Config.Cinemas[id].label
     st.price = Config.TicketPrice
@@ -133,21 +151,22 @@ end
 
 local function nearSeller(src, id)
     local s = Config.Cinemas[id].seller.coords
-    return #(GetEntityCoords(GetPlayerPed(src)) - vector3(s.x, s.y, s.z)) <= 5.0
+    return #(GetEntityCoords(GetPlayerPed(src)) - vector3(s.x, s.y, s.z)) <= SELLER_RANGE + 1.0
 end
 
-lib.callback.register('rsg-cinema:server:getInfo', function(src, id)
-    if type(id) ~= 'string' or not Cinemas[id] then return nil end
-    return ticketInfo(src, id)
+RSGCore.Functions.CreateCallback('rsg-cinema:server:getInfo', function(src, cb, id)
+    local Player = RSGCore.Functions.GetPlayer(src)
+    if not Player or not validCinema(id) or not nearSeller(src, id) then return cb(nil) end
+    cb(ticketInfo(Player, id))
 end)
 
 local lastBuy = {}
-lib.callback.register('rsg-cinema:server:buyTicket', function(src, id)
+RSGCore.Functions.CreateCallback('rsg-cinema:server:buyTicket', function(src, cb, id)
     local Player = RSGCore.Functions.GetPlayer(src)
-    if not Player or type(id) ~= 'string' or not Cinemas[id] then return nil end
-    if lastBuy[src] and GetGameTimer() - lastBuy[src] < 2000 then return ticketInfo(src, id) end
-    lastBuy[src] = GetGameTimer()
-    if not nearSeller(src, id) then return nil end
+    if not Player or not validCinema(id) or not nearSeller(src, id) then return cb(nil) end
+    local now = GetGameTimer()
+    if lastBuy[src] and now - lastBuy[src] < 2000 then return cb(ticketInfo(Player, id)) end
+    lastBuy[src] = now
 
     local c, st = Cinemas[id], publicState(id)
     local cid = Player.PlayerData.citizenid
@@ -161,22 +180,22 @@ lib.callback.register('rsg-cinema:server:buyTicket', function(src, id)
         c.tickets[cid] = Config.TicketPrice -- price paid, used for refunds
         notify(src, locale('sv_ticket_bought', st.film), 'success')
     end
-    return ticketInfo(src, id)
+    cb(ticketInfo(Player, id))
 end)
 
--- A ticket holder's client reports the END_OF_MOVIE_MARKER; only accepted after the minimum runtime
+-- A viewer's client reports the END_OF_MOVIE_MARKER; only accepted after the minimum runtime and from inside
 RegisterNetEvent('rsg-cinema:server:filmEnded', function(id)
     local src = source
     local Player = RSGCore.Functions.GetPlayer(src)
-    if not Player or type(id) ~= 'string' then return end
+    if not Player or not validCinema(id) then return end
     local c = Cinemas[id]
-    if not c or not c.playing or (not c.public and not c.tickets[Player.PlayerData.citizenid]) then return end
+    if not c.playing or (not c.public and not c.tickets[Player.PlayerData.citizenid]) then return end
     if os.time() - c.startedAt < Config.MinShowLength then return end
     if #(GetEntityCoords(GetPlayerPed(src)) - Config.Cinemas[id].centre) > Config.WatchRadius + 5.0 then return end
     endShow(id)
 end)
 
--- Rejoin after relog/resource restart while a show is running
+-- Rejoin after relog while a show is running
 RegisterNetEvent('rsg-cinema:server:sync', function()
     local src = source
     local Player = RSGCore.Functions.GetPlayer(src)
@@ -189,6 +208,8 @@ RegisterNetEvent('rsg-cinema:server:sync', function()
     end
 end)
 
+AddEventHandler('playerDropped', function() lastBuy[source] = nil end)
+
 ---------------------------------------------------------------- admin panel
 local function isAdmin(src)
     return RSGCore.Functions.HasPermission(src, Config.AdminPermission)
@@ -199,13 +220,12 @@ local function adminData()
     for id, c in pairs(Cinemas) do
         local cfg = Config.Cinemas[id]
         local st = publicState(id)
-        local films = {}
+        local films, sold = {}, 0
         for i, fi in ipairs(cfg.films) do films[#films + 1] = { index = i, label = Config.Films[fi].label } end
-        local sold = 0
         for _ in pairs(c.tickets) do sold = sold + 1 end -- tickets is keyed by citizenid
         list[#list + 1] = {
             id = id, label = cfg.label, film = st.film, filmIndex = c.filmIndex, films = films,
-            playing = c.playing, public = c.public == true, startsIn = st.startsIn,
+            playing = c.playing, public = c.public, startsIn = st.startsIn,
             elapsed = c.playing and (os.time() - c.startedAt) or 0, tickets = sold, draw = cfg.draw,
         }
     end
@@ -213,36 +233,38 @@ local function adminData()
     return list
 end
 
-lib.callback.register('rsg-cinema:server:adminData', function(src)
-    if not isAdmin(src) then return nil end
-    return adminData()
+RSGCore.Functions.CreateCallback('rsg-cinema:server:adminData', function(src, cb)
+    cb(isAdmin(src) and adminData() or nil)
 end)
 
-RegisterNetEvent('rsg-cinema:server:adminAction', function(action, id, filmIndex)
-    local src = source
-    if not isAdmin(src) then return end
-    if type(id) ~= 'string' or not Cinemas[id] then return notify(src, locale('sv_bad_cinema'), 'error') end
-    local c = Cinemas[id]
-    if action == 'start' then
-        if c.playing then return notify(src, locale('sv_already_playing'), 'error') end
-        filmIndex = math.tointeger(tonumber(filmIndex or '') or 0)
-        if filmIndex and Config.Cinemas[id].films[filmIndex] then c.filmIndex = filmIndex end
-        startShow(id, true)
-        notify(src, locale('sv_started', Config.Cinemas[id].label), 'success')
-    elseif action == 'stop' then
-        if not c.playing then return notify(src, locale('sv_not_playing'), 'error') end
-        if not c.public then -- paid showing cut short by an admin: refund online ticket holders
-            for cid, paid in pairs(c.tickets) do
-                local P = RSGCore.Functions.GetPlayerByCitizenId(cid)
-                if P and type(paid) == 'number' and paid > 0 then
-                    P.Functions.AddMoney('cash', paid, 'cinema-refund')
-                    notify(P.PlayerData.source, locale('sv_refunded', Config.Cinemas[id].label), 'inform')
-                end
-            end
-        end
-        endShow(id)
-        notify(src, locale('sv_stopped', Config.Cinemas[id].label), 'success')
+-- returns the refreshed panel data so the NUI never has to guess when the action finished
+RSGCore.Functions.CreateCallback('rsg-cinema:server:adminAction', function(src, cb, action, id, filmIndex)
+    if not isAdmin(src) then return cb(nil) end
+    if not validCinema(id) then
+        notify(src, locale('sv_bad_cinema'), 'error')
+        return cb(adminData())
     end
+    local c, label = Cinemas[id], Config.Cinemas[id].label
+    if action == 'start' then
+        if c.playing then
+            notify(src, locale('sv_already_playing'), 'error')
+        else
+            filmIndex = math.tointeger(tonumber(filmIndex))
+            if filmIndex and Config.Cinemas[id].films[filmIndex] then c.filmIndex = filmIndex end
+            refundTickets(id) -- the free showing replaces the paid one: give holders their money back
+            startShow(id, true)
+            notify(src, locale('sv_started', label), 'success')
+        end
+    elseif action == 'stop' then
+        if not c.playing then
+            notify(src, locale('sv_not_playing'), 'error')
+        else
+            if not c.public then refundTickets(id) end -- paid showing cut short: refund online holders
+            endShow(id)
+            notify(src, locale('sv_stopped', label), 'success')
+        end
+    end
+    cb(adminData())
 end)
 
 local function num(v, lo, hi)
@@ -266,5 +288,3 @@ end)
 RSGCore.Commands.Add(Config.AdminCommand, locale('sv_cmd_help'), {}, false, function(src)
     TriggerClientEvent('rsg-cinema:client:openAdmin', src)
 end, Config.AdminPermission)
-
-AddEventHandler('playerDropped', function() lastBuy[source] = nil end)

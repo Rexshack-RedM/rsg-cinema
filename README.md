@@ -4,29 +4,30 @@ Moving picture shows for the RSG Framework.
 Films are projected through each cinema's own projector light, exactly as in single player.
 
 ## Features
-- **Ticket seller** NPC (ox_target) with NUI: next film, countdown and price. Sellers only spawn when a player is nearby.
+- **Ticket seller** NPC (rsg-target) with NUI: next film, live countdown and price. The panel refreshes itself while open and closes if you walk away. Sellers only spawn when a player is nearby.
 - **Scheduled showings** per cinema (server-run). Films play in rotation; a showing is skipped when no tickets were sold.
 - **Tickets** are paid in cash on the server, one per character per showing. Only ticket holders inside the cinema see and hear the film.
+- **Several cinemas at once**: shows can run in every town at the same time; you see whichever one you are inside.
 - **House lights** fade down while a film plays and back up afterwards (Rockstar's own light positions).
 - **Admin panel** (`/cinemaadmin`):
   - pick a film and start or stop it at any cinema (admin starts are free showings for everyone inside)
-  - stopping a paid showing refunds online ticket holders
+  - starting a free showing, or stopping a paid one, refunds online ticket holders
   - **Picture** sliders to position and size the film on the screen, with a live preview; **Save** applies it for everyone and keeps it in `data/draw.json`
   - the panel can be dragged by its header (double-click the header to re-centre)
-- Cinemas: **Saint Denis** and **Blackwater** enabled, **Valentine** ready in config.
-
-## Languages
-All player-facing text (notifications, NUI, ox_target label, blip, film and cinema names) is in ox_lib locales:
-`en`, `de`, `el`, `es`, `fr`, `ja`, `nl`, `pl`, `pt-br`, `ro`. Set the language with `setr ox:locale "de"` in server.cfg.
-Film and cinema `label` values in the config are locale keys.
+- Cinemas: **Saint Denis**, **Valentine** and **Blackwater**.
 
 ## Requirements
-- rsg-core, ox_lib, ox_target
+- rsg-core, rsg-target (no ox_lib needed)
 
 ## Installation
 1. Drop `rsg-cinema` into your resources folder.
-2. Add `ensure rsg-cinema` to your server.cfg (after rsg-core, ox_lib and ox_target).
+2. Add `ensure rsg-cinema` to your server.cfg (after rsg-core and rsg-target).
 3. Make sure the server can write to `rsg-cinema/data/draw.json` (picture settings).
+
+## Languages
+All player-facing text (notifications, NUI, target label, blip, film and cinema names) is in rsg-core JSON locales:
+`en`, `de`, `el`, `es`, `fr`, `ja`, `nl`, `pl`, `pt-br`, `ro`. Set the language with `setr rsg:locale "de"` in server.cfg.
+Film and cinema `label` values in the config are locale keys.
 
 ## Configuration (`shared/config.lua`)
 | Setting | Purpose |

@@ -4,10 +4,10 @@ game 'rdr3'
 lua54 'yes'
 
 description 'rsg-cinema - moving picture shows rebuilt from RDR2 show_movie_magic_lantern'
-version '3.0.0'
+version '3.0.1'
 
 shared_scripts {
-    '@ox_lib/init.lua',
+    '@rsg-core/shared/locale.lua',
     'shared/config.lua'
 }
 
@@ -31,6 +31,5 @@ files {
 
 dependencies {
     'rsg-core',
-    'ox_lib',
-    'ox_target'
+    'rsg-target'
 }
