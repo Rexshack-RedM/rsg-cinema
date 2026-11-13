@@ -85,4 +85,4 @@ Tickets are bought and checked on the server (one per character per showing). On
 | Seller missing | Move within `SellerSpawnDistance` |
 | Picture off-centre | Adjust it in the admin panel and Save |
 
-Support: https://buymeacoffee.com/rexshack
+Support the Project : https://rexshack.tebex.store/
